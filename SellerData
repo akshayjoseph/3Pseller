@@ -1,0 +1,159 @@
+import requests
+from lxml import html
+from lxml.etree import ParserError
+import argparse
+import unicodecsv as csv
+import traceback
+
+
+def get_parser(url, base_url):
+    '''
+    Returns the parser using the url and base_url and has a retry of 5
+    '''
+    # Add some recent user agent to prevent blocking from amazon
+    headers = {
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/83.0.4103.116 Safari/537.36'
+
+    }
+
+    for retry in range(5):
+        try:
+            print("Downloading and processing page :", url)
+            response = requests.get(url, headers=headers)
+            if response.status_code == 403:
+                raise ValueError("Captcha found. Retrying")
+
+            response_text = response.text
+            parser = html.fromstring(response_text)
+            parser.make_links_absolute(base_url)
+            return parser
+
+        except ParserError:
+            print("empty page found")
+            break
+        except:
+            print(traceback.format_exc())
+            print("retying :", url)
+
+
+def parse_offer_details(parser):
+    XPATH_PRODUCT_LISTINGS = "//div[contains(@class, 'a-row a-spacing-mini olpOffer')]"
+    # Parsing seller list
+    listings = parser.xpath(XPATH_PRODUCT_LISTINGS)
+    offer_list = []
+
+    if not listings:
+        print("no sellers found")
+        return offer_list
+
+    # parsing individual seller
+    for listing in listings:
+        XPATH_PRODUCT_PRICE = ".//span[contains(@class, 'olpOfferPrice')]//text()"
+        XPATH_PRODUCT_PRIME = ".//i/@aria-label"
+        XPATH_PRODUCT_SHIPPING = ".//p[contains(@class, 'olpShippingInfo')]//text()"
+        XPATH_PRODUCT_CONDITION = ".//span[contains(@class, 'olpCondition')]//text()"
+        XPATH_PRODUCT_DELIVERY = ".//div[contains(@class, 'olpDeliveryColumn')]//text()"
+        XPATH_PRODUCT_SELLER1 = ".//h3[contains(@class, 'olpSellerName')]//a/text()"
+        XPATH_PRODUCT_SELLER2 = ".//h3[contains(@class, 'olpSellerName')]//img//@alt"
+        XPATH_PRODUCT_SELLER_RATTING = ".//div[contains(@class, 'olpSellerColumn')]//span[contains(@class, 'a-icon-alt')]//text()"
+        XPATH_PRODUCT_SELLER_PERCENTAGE = ".//div[contains(@class, 'olpSellerColumn')]//b/text()"
+        XPATH_PRODUCT_SELLER_URL = ".//h3[contains(@class, 'olpSellerName')]//a/@href"
+
+        product_price = listing.xpath(XPATH_PRODUCT_PRICE)
+        product_prime = listing.xpath(XPATH_PRODUCT_PRIME)
+        product_condition = listing.xpath(XPATH_PRODUCT_CONDITION)
+        product_shipping = listing.xpath(XPATH_PRODUCT_SHIPPING)
+        delivery = listing.xpath(XPATH_PRODUCT_DELIVERY)
+        seller1 = listing.xpath(XPATH_PRODUCT_SELLER1)
+        seller2 = listing.xpath(XPATH_PRODUCT_SELLER2)
+        seller_ratting = listing.xpath(XPATH_PRODUCT_SELLER_RATTING)
+        seller_percentage = listing.xpath(XPATH_PRODUCT_SELLER_PERCENTAGE)
+        seller_url = listing.xpath(XPATH_PRODUCT_SELLER_URL)
+
+        # cleaning parsed data
+        product_price = product_price[0].strip()
+        product_prime = product_prime[0].strip() if product_prime else None
+        product_condition = ''.join(''.join(product_condition).split()) if product_condition else None
+        product_shipping_details = ' '.join(''.join(product_shipping).split()).lstrip("&").rstrip(
+            "Details") if product_shipping else None
+        cleaned_delivery = ' '.join(''.join(delivery).split()).replace("Shipping rates and return policy.",
+                                                                       "").strip() if delivery else None
+        product_seller = ''.join(seller1).strip() if seller1 else ''.join(seller2).strip()
+        seller_ratting = seller_ratting[0].split()[0].strip() if seller_ratting else None
+        seller_percentage = seller_percentage[0].strip() if seller_percentage else None
+        seller_url = seller_url[0].strip() if seller_url else None
+
+        offer_details = {
+            'price': product_price,
+            'shipping_detais': product_shipping_details,
+            'condition': product_condition,
+            'prime': product_prime,
+            'delivery': cleaned_delivery,
+            'seller': product_seller,
+            'seller_rating': seller_ratting,
+            'seller_percentage': seller_percentage,
+            'seller_url': seller_url,
+            'asin': asin,
+            'url': url,
+        }
+        offer_list.append(offer_details)
+    return offer_list
+
+
+def parse_pages(parser):
+    XPATH_PAGINATION = "//div[contains(@class, 'a-text-center a-spacing-large')]"
+    paginations = parser.xpath(XPATH_PAGINATION)
+    PAGES = ".//span[contains(@class, 'aok-offscreen')]//text()"
+    if not paginations:
+        return ""
+    return paginations[0].xpath(PAGES)
+
+
+if __name__ == '__main__':
+    # defining arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('asin', help='unique product id, eg "B01DQ2B8UY"')
+    parser.add_argument('country', help='product shipping country eg "usa", "ca"', default="usa")
+    args = parser.parse_args()
+    asin = args.asin
+    country = args.country
+
+    # for creating url according to the filter applied
+    country_dict = {'usa': 'com',
+                    'ca': 'ca'
+                    }
+
+    base_url = "https://www.amazon." + country_dict.get(country)
+
+    url = base_url + '/gp/offer-listing/' + asin + '/ref&condition=all&shipping=all'
+
+    parser = get_parser(url, base_url)
+    pages = parse_pages(parser)
+    num_of_pages = 0
+    if pages:
+        num_of_pages = len(pages) - 3
+        print(f"Number of seller details in {num_of_pages} pages...")
+        page_range = num_of_pages + 1
+    else:
+        print(f"{num_of_pages} pages to inspect")
+        page_range = num_of_pages + 2
+    data = []
+    for page in range(page_range):
+        if page == 0:
+            continue
+        if page == 1:
+            url = base_url + '/gp/offer-listing/' + asin + '/ref&condition=all&shipping=all'
+        else:
+            url = base_url + '/gp/offer-listing/' + asin + f'/ref=olp_page_{page}&condition=all&shipping=all&startIndex={(page-1)*10}'
+        parser = get_parser(url, base_url)
+        data.extend(parse_offer_details(parser))
+
+    if data:
+        print('Writing results to  the file: ', asin, '-sellers.csv')
+        with open(asin + '-sellers.csv', 'wb')as csvfile:
+            fieldnames = ['seller', 'seller_rating', 'seller_percentage', 'price', 'prime', 'condition',
+                          'shipping_detais', 'delivery', 'seller_url', 'url', 'asin']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames, quoting=csv.QUOTE_ALL)
+            writer.writeheader()
+            for row in data:
+                writer.writerow(row)
